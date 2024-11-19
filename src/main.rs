@@ -1,9 +1,21 @@
 // #![warn(missing_docs)]
 
-use std::{ fmt::format, ops::Index };
+use core::panic;
+use std::{ fmt::format, ops::Index, option };
 
 use reqwest::{ self, blocking::get, Error, Version };
-use scraper::{ element_ref::Select, error, html, node::Element, ElementRef, Html, Selector };
+use scraper::{
+    element_ref::Select,
+    error,
+    html,
+    node::Element,
+    selector,
+    ElementRef,
+    Html,
+    Selector,
+};
+
+const SITO_COMUNE: &str = "https://www.comune.montopoli.pi.it";
 
 #[derive(Debug)]
 /*  */
@@ -13,13 +25,16 @@ struct Event {
     permalink: String,
     title: String,
     subtitle: String,
+    description_title: String,
     description: String,
+    location: String,
+    image: String,
     //starting_date: Option<String>,
     //ending_date: String,
 }
 
 impl Event {
-    fn event_constructor(base_url: String, node: ElementRef<'_>) -> Self {
+    fn event_constructor(base_url: &str, node: ElementRef<'_>) -> Self {
         /* Finding rel_permalink from cards */
         let optional_rel_permalink = match node.value().attr("href") {
             None => "".to_string(),
@@ -35,33 +50,65 @@ impl Event {
             Err(err) => { panic!("Couldn't get document: {err:?}") }
         };
 
+        /* Getting title */
+        let title_sel = match Selector::parse("h1") {
+            Ok(selector) => selector,
+            Err(err) => panic!("Couldnt parse selector: {err:?}"),
+        };
+        let title_node = event_page.select(&title_sel);
+
         /* Getting subtitle */
-        let subtitle_sel = match Selector::parse(".col-lg-8 h4 ") {
+        let subtitle_sel = match Selector::parse("h1+ h4 ") {
             Ok(selector) => selector,
             Err(err) => panic!("Couldnt parse selector: {err:?}"),
         };
         let subtitle_node = event_page.select(&subtitle_sel);
 
+        /* Getting description title */
+        let description_title_sel = match Selector::parse("#_event_estesa h4") {
+            Ok(selector) => selector,
+            Err(err) => panic!("Couldnt parse selector: {err:?}"),
+        };
+        let description_title_nodes = event_page.select(&description_title_sel);
+
         /* Getting description */
-        let description_sel = match Selector::parse("#_event_estesa *") {
+        let description_sel = match Selector::parse("#_event_estesa  p") {
             Ok(selector) => selector,
             Err(err) => panic!("Couldnt parse selector: {err:?}"),
         };
         let description_nodes = event_page.select(&description_sel);
 
+        /* Getting location */
+        let location_sel = match Selector::parse("#_event_luogo h5") {
+            Ok(selector) => selector,
+            Err(err) => panic!("Couldnt parse selector: {err:?}"),
+        };
+        let location_nodes = event_page.select(&location_sel);
+
+        /* Getting post image */
+        let image_sel = match Selector::parse(".col-lg-8 img") {
+            Ok(selector) => selector,
+            Err(err) => panic!("Couldnt parse selector: {err:?}"),
+        };
+        let image_node = event_page.select(&image_sel);
+        let image_rel_permalink = get_single_elementref(image_node)
+            .expect("couldn't get image")
+            .value()
+            .attr("src")
+            .expect("couldn't get image source")
+            .to_string();
+
+        /* Building struct */
         Self {
-            base_url: base_url,
+            base_url: base_url.to_string(),
             rel_permalink: optional_rel_permalink,
             permalink: permalink,
-            title: node.value().name().to_string(),
-            subtitle: match get_element_value(subtitle_node) {
-                Some(subtitle) => subtitle,
-                None => "".to_string(),
-            },
-            description: match get_element_value(description_nodes) {
-                Some(description) => description,
-                None => "".to_string(),
-            },
+            title: get_element_value(title_node),
+            subtitle: get_element_value(subtitle_node),
+            description_title: get_element_value(description_title_nodes),
+            description: get_element_value(description_nodes),
+            location: get_element_value(location_nodes),
+            image: build_permalink(&SITO_COMUNE, &image_rel_permalink),
         }
     }
 }
@@ -89,12 +136,29 @@ fn get_single_elementref<'a>(nodes: scraper::html::Select<'a, '_>) -> Option<Ele
 }
 
 /* This function gets element values from selected nodes*/
-fn get_element_value(nodes: scraper::html::Select<'_, '_>) -> Option<String> {
+fn get_element_value(nodes: scraper::html::Select<'_, '_>) -> String {
+    let mut joined_text: String = "".to_string();
+
     for node in nodes {
-        return Some(node.text().collect::<String>().trim().to_owned());
+        let optional_value = Some(node.text().collect::<String>().trim().to_owned());
+
+        let value = match optional_value {
+            Some(value) => value,
+            None => panic!("No value in nodes"),
+        };
+
+        joined_text.push_str(&value);
     }
 
-    None
+    joined_text
+}
+
+/**
+ * Builds a permalink from a base url and a relative permalink
+ */
+fn build_permalink(base_url: &str, rel_permalink: &str) -> String {
+    let permalink = format!("{}{}", base_url, rel_permalink);
+    permalink
 }
 
 //#TODO
@@ -109,9 +173,8 @@ fn get_element_value(nodes: scraper::html::Select<'_, '_>) -> Option<String> {
  * main
  */
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sito_comune = "https://www.comune.montopoli.pi.it".to_string();
     let pagina_eventi = "/home/vivere/eventi.html".to_string();
-    let mydocument = get_document(&build_permalink(&sito_comune, &pagina_eventi))?;
+    let mydocument = get_document(&build_permalink(&SITO_COMUNE, &pagina_eventi))?;
 
     let card_link_sel = Selector::parse(".eventi-elenco .cmp-list-card-img__body-title a")?;
     let card_link_nodes: html::Select<'_, '_> = mydocument.select(&card_link_sel);
@@ -122,15 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => panic!("sad"),
     };
 
-    /**
-     * Builds a permalink from a base url and a relative permalink
-     */
-    fn build_permalink(base_url: &str, rel_permalink: &str) -> String {
-        let permalink = format!("{}{}", base_url, rel_permalink);
-        permalink
-    }
-
-    let event1 = Event::event_constructor(sito_comune, card_link_node);
+    let event1 = Event::event_constructor(SITO_COMUNE, card_link_node);
 
     dbg!(event1);
 
